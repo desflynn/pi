@@ -98,6 +98,10 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// failures can arrive mid-stream without an HTTP 503 in the message.
 	"subscription_sharing_usage_unavailable",
 	"subscription_sharing_user_unavailable",
+
+	// Codex asks callers to retry when its model-access verification is unavailable.
+	// Match that transient failure, not a permanent Daybreak Blue access denial.
+	"unable to verify Daybreak Blue access\\. Please try again",
 ]);
 
 /**
