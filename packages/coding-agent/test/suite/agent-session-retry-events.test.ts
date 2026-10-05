@@ -30,27 +30,30 @@ describe("AgentSession retry and event characterization", () => {
 		}
 	});
 
-	it("retries after a transient error and succeeds", async () => {
-		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
-		harnesses.push(harness);
-		const retryEvents: string[] = [];
-		harness.session.subscribe((event) => {
-			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
-			if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}`);
-		});
+	it.each(["overloaded_error", "Codex error: Unable to verify Daybreak Blue access. Please try again."])(
+		"retries after a transient error and succeeds: %s",
+		async (errorMessage) => {
+			const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+			harnesses.push(harness);
+			const retryEvents: string[] = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
+				if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}`);
+			});
 
-		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
-			fauxAssistantMessage("recovered"),
-		]);
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+				fauxAssistantMessage("recovered"),
+			]);
 
-		await harness.session.prompt("test");
+			await harness.session.prompt("test");
 
-		expect(retryEvents).toEqual(["start:1", "end:true"]);
-		expect(harness.eventsOfType("agent_end").map((event) => event.willRetry)).toEqual([true, false]);
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.session.isRetrying).toBe(false);
-	});
+			expect(retryEvents).toEqual(["start:1", "end:true"]);
+			expect(harness.eventsOfType("agent_end").map((event) => event.willRetry)).toEqual([true, false]);
+			expect(harness.faux.state.callCount).toBe(2);
+			expect(harness.session.isRetrying).toBe(false);
+		},
+	);
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
@@ -158,16 +161,19 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
 	});
 
-	it("does not retry non-retryable errors", async () => {
-		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "invalid_api_key" })]);
+	it.each(["invalid_api_key", "insufficient_quota", "Codex error: Daybreak Blue access denied."])(
+		"does not retry non-retryable errors: %s",
+		async (errorMessage) => {
+			const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage })]);
 
-		await harness.session.prompt("test");
+			await harness.session.prompt("test");
 
-		expect(harness.faux.state.callCount).toBe(1);
-		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
-	});
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+		},
+	);
 
 	it("cancels retry sleep when abortRetry is called", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 100 } } });

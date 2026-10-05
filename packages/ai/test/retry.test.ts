@@ -14,6 +14,7 @@ const wrappedDnsLookupError =
 	"The pending stream has been canceled (caused by: getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com)";
 const azurePeakLoadError =
 	"The system is currently experiencing high demand and cannot process your request. Your request exceeds the maximum usage size allowed during peak load. For improved capacity reliability, consider switching to Provisioned Throughput.";
+const codexDaybreakVerificationError = "Codex error: Unable to verify Daybreak Blue access. Please try again.";
 
 describe("provider retry classification", () => {
 	it("matches explicit provider retry guidance", () => {
@@ -84,6 +85,13 @@ describe("provider retry classification", () => {
 			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: azurePeakLoadError })),
 		).toBe(true);
 	});
+
+	it.each(["Codex error: Daybreak Blue access denied.", "Codex error: You do not have Daybreak Blue access."])(
+		"keeps permanent Codex access denial non-retryable: %s",
+		(errorMessage) => {
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+		},
+	);
 
 	it("keeps provider limit errors non-retryable", () => {
 		expect(
@@ -176,6 +184,33 @@ describe("retryAssistantCall", () => {
 		expect(produce).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
 		expect(onRetryScheduled).toHaveBeenCalledTimes(3);
 		expect(onRetryFinished).toHaveBeenCalledWith(false, 3, "terminated");
+	});
+
+	it("recovers from a temporary Codex Daybreak Blue access verification failure", async () => {
+		const produce = vi
+			.fn<() => Promise<ReturnType<typeof fauxAssistantMessage>>>()
+			.mockResolvedValueOnce(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: codexDaybreakVerificationError }),
+			)
+			.mockResolvedValue(fauxAssistantMessage("recovered"));
+		const onRetryFinished = vi.fn();
+
+		const result = await retryAssistantCall(produce, enabled, undefined, { onRetryFinished });
+
+		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+		expect(produce).toHaveBeenCalledTimes(2);
+		expect(onRetryFinished).toHaveBeenCalledWith(true, 1);
+	});
+
+	it("bounds retries when Codex Daybreak Blue verification stays unavailable", async () => {
+		const produce = vi.fn(async () =>
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: codexDaybreakVerificationError }),
+		);
+
+		const result = await retryAssistantCall(produce, enabled, undefined);
+
+		expect(result.errorMessage).toBe(codexDaybreakVerificationError);
+		expect(produce).toHaveBeenCalledTimes(4);
 	});
 
 	it("reports capped retry delays", async () => {

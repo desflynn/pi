@@ -79,37 +79,40 @@ describe("#6647 compaction retries transient summarization failures", () => {
 		return () => callCount;
 	}
 
-	it("retries a transient `terminated` summarization error and compacts successfully", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
-		harnesses.push(harness);
-		seedCompactableSession(harness);
-		harness.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 0 } });
+	it.each(["terminated", "Codex error: Unable to verify Daybreak Blue access. Please try again."])(
+		"retries a transient summarization error and compacts successfully: %s",
+		async (errorMessage) => {
+			const harness = await createHarness({ withConfiguredAuth: false });
+			harnesses.push(harness);
+			seedCompactableSession(harness);
+			harness.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 0 } });
 
-		const model = harness.getModel();
-		const error = (errorMessage: string): AssistantMessage => ({
-			...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
-			usage: createUsage(10),
-		});
-		const success: AssistantMessage = {
-			...fauxAssistantMessage("recovered summary"),
-			usage: createUsage(10),
-		};
-		const getCallCount = useScriptedStreamFn(harness, [error("terminated"), error("terminated"), success]);
+			const model = harness.getModel();
+			const error = (errorMessage: string): AssistantMessage => ({
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+				usage: createUsage(10),
+			});
+			const success: AssistantMessage = {
+				...fauxAssistantMessage("recovered summary"),
+				usage: createUsage(10),
+			};
+			const getCallCount = useScriptedStreamFn(harness, [error(errorMessage), error(errorMessage), success]);
 
-		const result = await harness.session.compact();
+			const result = await harness.session.compact();
 
-		expect(result.summary).toContain("recovered summary");
-		expect(getCallCount()).toBe(3); // 1 prefix-summary attempt + 2 retries
-		const starts = harness.eventsOfType("summarization_retry_scheduled");
-		const ends = harness.eventsOfType("summarization_retry_finished");
-		expect(starts).toHaveLength(2);
-		expect(ends).toHaveLength(1);
-		expect(starts[0]).toMatchObject({ attempt: 1, maxAttempts: 3, errorMessage: "terminated" });
-		expect(starts[1]).toMatchObject({ attempt: 2, maxAttempts: 3 });
-		expect(ends[0]).toMatchObject({ type: "summarization_retry_finished" });
-		// model.* referenced to keep imports honest
-		expect(model.id).toBeTruthy();
-	});
+			expect(result.summary).toContain("recovered summary");
+			expect(getCallCount()).toBe(3); // 1 prefix-summary attempt + 2 retries
+			const starts = harness.eventsOfType("summarization_retry_scheduled");
+			const ends = harness.eventsOfType("summarization_retry_finished");
+			expect(starts).toHaveLength(2);
+			expect(ends).toHaveLength(1);
+			expect(starts[0]).toMatchObject({ attempt: 1, maxAttempts: 3, errorMessage });
+			expect(starts[1]).toMatchObject({ attempt: 2, maxAttempts: 3 });
+			expect(ends[0]).toMatchObject({ type: "summarization_retry_finished" });
+			// model.* referenced to keep imports honest
+			expect(model.id).toBeTruthy();
+		},
+	);
 
 	it("does not retry a non-retryable error (insufficient_quota)", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
