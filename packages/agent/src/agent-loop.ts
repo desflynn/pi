@@ -817,6 +817,39 @@ export async function runToolCall(toolCall: AgentToolCall, options: RunToolCallO
 	return finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal);
 }
 
+/**
+ * Race a tool executor against its abort signal. A misbehaving executor can ignore the
+ * signal (for example an MCP adapter that forwards neither the signal nor a timeout); the
+ * turn must not stay hostage to it. Rejection of the losing promise is always observed, so
+ * a late executor failure can never surface as an unhandled rejection.
+ */
+function raceToolAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		if (signal.aborted) {
+			reject(abortErrorFromSignal(signal));
+			return;
+		}
+		const onAbort = () => reject(abortErrorFromSignal(signal));
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
+function abortErrorFromSignal(signal: AbortSignal): Error {
+	if (signal.reason instanceof Error) return signal.reason;
+	if (signal.reason !== undefined) return new Error(String(signal.reason));
+	return new Error("Tool execution aborted");
+}
+
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	signal: AbortSignal | undefined,
@@ -826,15 +859,13 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
-		const result = await prepared.tool.execute(
-			prepared.toolCall.id,
-			prepared.args as never,
-			signal,
-			(partialResult) => {
+		const executePromise = Promise.resolve(
+			prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
 				if (!acceptingUpdates) return;
 				updateEvents.push(Promise.resolve(onUpdate(partialResult)));
-			},
+			}),
 		);
+		const result = signal ? await raceToolAbort(executePromise, signal) : await executePromise;
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
 		return { result, isError: result.isError === true };

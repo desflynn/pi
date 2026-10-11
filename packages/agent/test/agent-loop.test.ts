@@ -412,6 +412,64 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResult?.role === "toolResult" ? toolResult.usage : undefined).toEqual(patchedToolUsage);
 	});
 
+	it("stops waiting for a tool executor that ignores the abort signal", async () => {
+		const toolSchema = Type.Object({});
+		let toolSettled = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "stuck",
+			label: "Stuck",
+			description: "Executor that ignores the abort signal, like a misbehaving MCP adapter",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params) {
+				// Deliberately ignores the signal argument; finishes late.
+				await new Promise((resolve) => setTimeout(resolve, 10_000));
+				toolSettled = true;
+				return { content: [{ type: "text", text: "late" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { messages: [], tools: [tool] };
+		const userPrompt: AgentMessage = createUserMessage("run stuck");
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "stuck", arguments: {} }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					stream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const controller = new AbortController();
+		const stream = agentLoop([userPrompt], context, config, controller.signal, streamFn);
+
+		const consumer = (async () => {
+			for await (const event of stream) {
+				if (event.type === "tool_execution_start") controller.abort();
+			}
+		})();
+		const timeout = new Promise((_, reject) =>
+			setTimeout(() => reject(new Error("loop hung: abort did not free the in-flight tool call")), 2_000),
+		);
+		await Promise.race([consumer, timeout]);
+
+		const messages = await stream.result();
+		const toolResult = messages.find((message) => message.role === "toolResult");
+		expect(toolResult).toBeDefined();
+		expect(toolSettled).toBe(false);
+	});
+
 	it("should not execute tool calls from a length-truncated assistant message", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];
